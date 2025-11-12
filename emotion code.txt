@@ -1,0 +1,606 @@
+"""
+app.py — Single-file Streamlit app: Text -> Photo/Camera -> Emotion (DeepFace) -> Rewrites (Ollama HTTP)
+
+STATUS: Cyber Dark Theme. No-neutral logic. Randomized fallbacks.
+"""
+
+import io
+import json
+import os
+import time
+import random # <-- ADDED IMPORT
+import re 
+from typing import Dict, List, Tuple
+
+import numpy as np
+import requests # Keep requests for Ollama
+import streamlit as st
+from PIL import Image
+
+# --- CONFIGURATION & SETUP ---
+st.set_page_config(
+    layout="wide", 
+    page_title="✍️ Emotion Based Text Rewriting ✍️",
+    initial_sidebar_state="collapsed"
+)
+
+# --- OLLAMA LOCAL MODEL CONFIGURATION ---
+OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "llama3:8b" # <-- Using llama3:8b as requested
+
+# --- GLOBAL EMOTION LIST (FOR RANDOM FALLBACKS) ---
+NON_NEUTRAL_EMOTIONS = ['happy', 'angry', 'surprise', 'fear', 'sad', 'disgust', 'contempt']
+
+
+# --- CUSTOM CSS FOR STYLING (Cyber Dark Theme) ---
+st.markdown(
+    """
+    <style>
+    /* Main Streamlit container styles (Cyber Dark Theme) */
+    .stApp {
+        background-color: #121212; /* Deep Charcoal Background */
+    }
+
+    /* Custom containers for sections */
+    .stCustomContainer {
+        padding: 30px;
+        border-radius: 12px;
+        /* Subtle glow effect for containers */
+        box-shadow: 0 0 15px rgba(106, 141, 255, 0.1); 
+        margin-bottom: 20px;
+        border: 1px solid #2A2A2A; /* Faint border */
+    }
+
+    /* Specific background for both column containers */
+    .input-container, .output-container {
+        background-color: #1E1E1E; /* Slightly lighter charcoal */
+    }
+
+    /* Style the input text area */
+    textarea[aria-label="Type something you want rewritten:"] {
+        background-color: #2A2A2A !important; /* Darker input bg */
+        border: 1px solid #6A8DFF; /* Accent Blue Border */
+        color: #FAFAFA; /* Light text */
+        border-radius: 8px;
+        padding: 10px;
+    }
+    textarea[aria-label="Type something you want rewritten:"]::placeholder {
+        color: #888; /* Dim gray placeholder text */
+    }
+
+    /* Style the submit button (Primary Action) */
+    div.stButton > button:first-child {
+        background-color: #6A8DFF; /* Bright Accent Blue */
+        color: #121212; /* Dark text for high contrast */
+        border-radius: 8px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: bold;
+        transition: all 0.3s;
+    }
+    div.stButton > button:first-child:hover {
+        background-color: #8AA8FF; /* Lighter blue on hover */
+        box-shadow: 0 0 10px rgba(106, 141, 255, 0.5); /* Glow on hover */
+    }
+    
+    /* Style the next rewrite button (Secondary Action) */
+    .stCustomButton button {
+        background-color: #03DAC6; /* Bright Teal/Cyan Accent */
+        color: #121212; /* Dark text */
+        border-radius: 8px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: bold;
+        transition: all 0.3s;
+    }
+    .stCustomButton button:hover {
+        background-color: #25F5E0; /* Lighter teal on hover */
+        box-shadow: 0 0 10px rgba(3, 218, 198, 0.5); /* Glow on hover */
+    }
+
+    /* Emotion Output Card (Rewrite Display - Dark Background) */
+    .emotion-card {
+        background-color: #2A2A2A; /* Dark card background */
+        padding: 20px;
+        border-left: 5px solid #BB86FC; /* Accent Purple line */
+        border-radius: 10px;
+        margin-top: 15px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    /* Center header for cleaner look */
+    h1 {
+        text-align: center;
+        color: #FAFAFA; /* Light text */
+        font-size: 3.5em; 
+        font-weight: 900;
+        /* Subtle text glow */
+        text-shadow: 0 0 8px rgba(106, 141, 255, 0.3); 
+        margin-bottom: 30px;
+        margin-top: 20px;
+    }
+    
+    /* Custom style for all section headers (h2) in columns */
+    .stCustomContainer h2 {
+        color: #BB86FC; /* Accent Purple for section titles */
+        margin-bottom: 20px;
+        border-bottom: 2px solid #BB86FC; /* Accent Purple underline */
+        padding-bottom: 10px;
+    }
+    
+    /* Custom style for the detected emotion badge */
+    .emotion-badge {
+        display: inline-block;
+        padding: 8px 20px;
+        border-radius: 25px;
+        background-color: #BB86FC; /* Accent Purple */
+        color: #121212; /* Dark text for contrast */
+        font-size: 1.3em;
+        font-weight: bold;
+        margin-top: 15px;
+        box-shadow: 0 0 10px rgba(187, 134, 252, 0.4); /* Badge glow */
+    }
+    
+    /* Ensure all text inside the custom dark containers is light */
+    .stCustomContainer label, .stCustomContainer p, .stCustomContainer .stMarkdown {
+        color: #E0E0E0; /* Light Gray text for readability */
+        font-size: 1.1em;
+    }
+
+    /* Override for text inside the dark emotion card */
+    .emotion-card p, .emotion-card h3, .emotion-card .stMarkdown {
+        color: #FAFAFA !important; /* Brightest text for high contrast on card */
+        font-size: 1em; 
+    }
+
+    /* Warning message styling (Dark Mode) */
+    div[data-testid="stAlert"] { 
+        background-color: #4A3E00 !important; /* Dark yellow/brown background */
+        color: #FFF5CC !important; /* Light yellow text */
+        border-left: 5px solid #FFC107 !important; /* Amber border */
+        border-radius: 8px;
+        padding: 10px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# --- DYNAMIC FALLBACK TEMPLATES ---
+# (Unchanged, keeping folded for brevity)
+FALLBACK_TEMPLATES = {
+    "happy": [
+        "I’m feeling great! I'm ready to tackle anything with a smile! 😄",
+        "It’s a perfect day! My energy levels are high. ✨",
+        "A positive attitude will make everything easy! Let's go! 🚀",
+    ],
+    "angry": [
+        "This whole situation is completely frustrating and unacceptable! 😡",
+        "I am furious right now! Don't talk to me. 😤",
+        "I am absolutely not in the mood for any nonsense right now. 😠",
+    ],
+    "surprise": [ 
+        "This came out of nowhere! I need a moment to process. 🤯",
+        "Look what the day dragged in! Surprise, surprise. 🎁😩",
+        "My brain is still loading the instructions... 1% ⏳"
+    ],
+    "fear": [ 
+        "I'm terrified, and I have to face this quickly! 😨",
+        "I need to handle this before it gets worse—I'm panicking! 😱",
+        "Every fiber of my being is screaming to run away. 😥",
+    ],
+    "sad": [ 
+        "I have to do this, but I'm already so tired and overwhelmed.😔",
+        "This feels like too much. I wish I didn't have to face this. 🥺",
+        "My heart's not in it. Dealing with this feels pointless right now.💔",
+    ],
+    "disgust": [ 
+        "This is revolting. I can't believe I have to touch this. 🤢",
+        "I am absolutely not in the mood for the nonsense! 😠",
+        "This whole situation is completely frustrating and unacceptable! 😡",
+    ],
+    "neutral": [ 
+        "Conquer this one step at a time; your strength is bigger than the challenge. 💪",
+        "Focus on the solution. Take a deep breath and start! ✅",
+        "It's time to organize and execute efficiently. 🧠"
+    ],
+    "contempt": [ 
+        "Oh, perfect. Just what I needed. My day is complete now. 🙄",
+        "Guess who has to handle this? Lucky me, I must be truly blessed. 🙃",
+        "I suppose having to deal with this is the most exciting thing happening. 😑",
+    ]
+}
+
+
+# Import DeepFace
+try:
+    from deepface import DeepFace
+except Exception as e:
+    st.error(
+        "DeepFace (emotion detection) import failed. Install with:\n\n"
+        "pip install deepface opencv-python\n\n"
+        f"Import error: {e}"
+    )
+    st.stop()
+
+
+# ---------- Helper functions ----------
+
+# <-- MODIFIED FUNCTION -->
+def detect_emotion_from_pil(pil_img: Image.Image) -> Tuple[str, Dict[str, float]]:
+    img_np = np.array(pil_img.convert("RGB"))
+    
+    # Pick a random non-neutral emotion as a fallback
+    DEFAULT_EMOTION = random.choice(NON_NEUTRAL_EMOTIONS) 
+    
+    try:
+        analyses = DeepFace.analyze(
+            img_path=img_np, 
+            actions=['emotion'], 
+            enforce_detection=False, 
+            detector_backend='opencv'
+        )
+        
+        if not analyses or not isinstance(analyses, list) or len(analyses) == 0:
+            st.warning(f"❌ No face detected. Defaulting to random emotion: '{DEFAULT_EMOTION}'.")
+            return DEFAULT_EMOTION, {}
+            
+        result = analyses[0]
+        dominant_emotion = result.get("dominant_emotion", DEFAULT_EMOTION)
+        emotions_dict = result.get("emotion", {})
+
+        # --- NEW LOGIC TO REMOVE 'NEUTRAL' ---
+        if dominant_emotion == "neutral" and emotions_dict:
+            st.toast("'Neutral' detected, finding next highest emotion...")
+            # Create a copy to avoid modifying the original dict if needed later
+            other_emotions = emotions_dict.copy()
+            other_emotions.pop("neutral", None)
+            
+            if other_emotions:
+                # Find the next highest emotion
+                dominant_emotion = max(other_emotions, key=other_emotions.get)
+            else:
+                # This happens if 'neutral' was 100% or the dict was empty
+                dominant_emotion = random.choice(NON_NEUTRAL_EMOTIONS)
+                st.toast(f"'Neutral' was 100%, defaulting to random emotion: '{dominant_emotion}'")
+        # --- END OF NEW LOGIC ---
+
+        # Return the *original* emotion dictionary for potential logging/display
+        return dominant_emotion, result.get("emotion", {})
+        
+    except Exception as e:
+        st.error(f"An error occurred during emotion detection: {e}. Defaulting to random emotion: '{DEFAULT_EMOTION}'.")
+        return DEFAULT_EMOTION, {}
+# <-- END OF MODIFIED FUNCTION -->
+
+def get_target_tone(detected_emotion: str) -> str:
+    return detected_emotion.lower()
+
+def build_prompt(user_text: str, detected_emotion: str, target_tone: str) -> str:
+    # This prompt is excellent and models like llama3 are good at it.
+    prompt = f"""
+You are a highly creative and human-like assistant. Your task is to rewrite the user's original text, adapting it to the specified tone. The new texts MUST serve as **synonyms or meaningful alternatives** for the original text while expressing the emotion.
+Original text:
+\"\"\"{user_text}\"\"\"
+
+The user's detected facial emotion is: {detected_emotion}.
+You MUST provide rewrites in the **{target_tone.capitalize()}** tone.
+**CRITICAL INSTRUCTION**: 
+1. The rewritten text must be **completely different** from the original text (i.e., not just prepending a phrase).
+2. The rewritten text must be **contextually relevant** to the original text (e.g., if the user wrote "I am hungry," the rewrite must be about hunger).
+3. The key must map to a list of **exactly 3 unique, varied, and human-like synonyms/alternatives** (1-2 sentences). Include an appropriate emoji for each variation.
+4. **DO NOT** use placeholders or generic templates.
+
+Produce rewrites in JSON with exactly the following key: **{target_tone.capitalize()}**.
+Return ONLY valid JSON and nothing else. Example structure:
+
+{{
+  "{target_tone.capitalize()}": ["First contextual synonym...", "Second contextual synonym...", "Third contextual synonym..."]
+}}
+"""
+    return prompt.strip()
+
+
+def call_ollama_json(prompt: str, target_tone: str, model_name: str = OLLAMA_MODEL, ollama_url: str = OLLAMA_URL) -> Dict[str, List[str]]:
+    """
+    Calls the local Ollama /api/chat endpoint and requests JSON format.
+    """
+    headers = {"Content-Type": "application/json"}
+    
+    # Payload for the /api/chat endpoint
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "format": "json" # Request JSON output directly
+    }
+    
+    expected_key = target_tone.capitalize()
+    raw_text_response = "" # For debugging errors
+
+    try:
+        # Increase timeout as local models on iGPU can be slow
+        r = requests.post(ollama_url, headers=headers, json=payload, timeout=90) 
+        r.raise_for_status() # Check for HTTP errors like 404 or 500
+        
+        resp_json = r.json()
+        
+        # Extract the text content from the Ollama response
+        raw_text_response = resp_json.get("message", {}).get("content", "")
+        
+        if raw_text_response and len(raw_text_response.strip()) > 0:
+            # The 'format="json"' parameter *should* mean raw_text_response is a valid JSON string.
+            # We keep the old parsing logic as a safeguard in case the model
+            # *still* adds markdown ```json ... ``` tags.
+            try:
+                # Find the start and end of the JSON object
+                json_start = raw_text_response.index("{")
+                json_end = raw_text_response.rindex("}") + 1
+                json_text = raw_text_response[json_start:json_end]
+            except ValueError:
+                # If no "{" or "}" is found, assume the whole response is the JSON
+                json_text = raw_text_response
+
+            parsed = json.loads(json_text)
+            
+            val = parsed.get(expected_key, [])
+            if isinstance(val, str): val = [val]
+            if not isinstance(val, list): val = [str(val)]
+            return {expected_key: [str(x).strip() for x in val if x and str(x).strip()][:3]}
+            
+    except requests.exceptions.ConnectionError:
+        st.error(f"❌ ConnectionError: Could not connect to Ollama. \n\nIs Ollama running at {OLLAMA_URL}?")
+        raise RuntimeError("Ollama connection failed.")
+    except Exception as e:
+        st.error(f"❌ Ollama parsing error: {e}. \n\nRaw model output: \n...{raw_text_response[-200:]}")
+        raise RuntimeError(f"Failed to get valid JSON from Ollama: {e}")
+
+    raise RuntimeError("Failed to get valid JSON from Ollama endpoint (empty response).")
+
+
+# <-- MODIFIED FUNCTION -->
+def fallback_rewrites(user_text: str, detected_emotion: str) -> Dict[str, List[str]]:
+    """
+    Generates a pool of 3 contextual emotional expressions by combining 
+    the user's text with an emotional phrase. Used only when Ollama API fails.
+    """
+    target_emotion = detected_emotion.lower()
+    
+    # Clean and simplify the user text for insertion
+    simple_user_text = user_text.lower().replace('.', '').strip()
+    
+    # Templates for combining with user_text
+    FALLBACK_CONTEXTUAL_TEMPLATES = {
+        "happy": [
+            f"It's great news that **{simple_user_text}**. I'm thrilled! 😄",
+            f"Since **{simple_user_text}**, let's celebrate! 🎉",
+            f"I'm so cheerful about **{simple_user_text}**, what a relief! 😊"
+        ],
+        "angry": [
+            f"I absolutely refuse to deal with this: **{simple_user_text}** right now! 😡",
+            f"I'm furious that **{simple_user_text}**. This is unacceptable! 🤬",
+            f"Do not make me deal with **{simple_user_text}**! I've had enough. 😠"
+        ],
+        "surprise": [ 
+            f"Wait, **{simple_user_text}**? I can't believe it! 🤯",
+            f"Did you just say **{simple_user_text}**? That's a huge shock! 😲",
+            f"Wow, **{simple_user_text}**. I was completely unprepared for that. 😳"
+        ],
+        "fear": [ 
+            f"I have to do this, but I'm terrified of **{simple_user_text}**... 😨",
+            f"I need to handle **{simple_user_text}** quickly before something goes wrong. 😱",
+            f"This situation, **{simple_user_text}**, is making me panic. 😥",
+        ],
+        "sad": [ 
+            f"It breaks my heart, but **{simple_user_text}**. I wish it weren't so. 😔",
+            f"This feels too heavy, especially since **{simple_user_text}**. 💔",
+            f"I must deal with **{simple_user_text}** now, but I'm just so weary... 😞",
+        ],
+        "disgust": [ 
+            f"Ugh, having to deal with **{simple_user_text}** makes me sick. 🤢",
+            f"I'm repulsed by the idea of **{simple_user_text}**. I want no part of it. 🤮",
+            f"That whole situation, **{simple_user_text}**, is truly foul. 😖",
+        ],
+        "neutral": [ 
+            f"I will proceed with **{simple_user_text}** as planned, no rush. ✅",
+            f"I'll handle **{simple_user_text}**. It's simply the next task. 🧠",
+            f"The situation is **{simple_user_text}**. Let's remain objective. 😐"
+        ],
+        "contempt": [ 
+            f"I suppose I'm *forced* to deal with **{simple_user_text}**. Lucky me. 🙄",
+            f"Oh, look, *this* is the exciting task: **{simple_user_text}**. What a privilege. 😒",
+            f"If **{simple_user_text}** is the best they can come up with, I'm unimpressed. 😑",
+        ]
+    }
+
+    all_templates = FALLBACK_CONTEXTUAL_TEMPLATES.get(target_emotion, [])
+
+    if len(all_templates) < 3:
+        # Fallback to a random emotion's template if the primary one isn't handled
+        random_fallback_emotion = random.choice(NON_NEUTRAL_EMOTIONS)
+        all_templates.extend(FALLBACK_CONTEXTUAL_TEMPLATES.get(random_fallback_emotion, []))
+        
+    if not all_templates:
+        # Final emergency fallback (using happy as a last resort)
+        all_templates = FALLBACK_CONTEXTUAL_TEMPLATES.get("happy", [])
+        if not all_templates: # Absolute final fallback
+             return {target_emotion.capitalize(): [f"Fallback error: Could not generate contextual expression for {target_emotion} tone."]}
+
+    selected_templates = random.sample(all_templates, min(3, len(all_templates)))
+    return {target_emotion.capitalize(): selected_templates}
+# <-- END OF MODIFIED FUNCTION -->
+
+
+# ---------- Streamlit UI ----------
+
+st.markdown("<h1> Emotion Based Text Rewriting ✍️</h1>", unsafe_allow_html=True) 
+
+# (Session state initialization is unchanged)
+if "rewrite_pool" not in st.session_state:
+    st.session_state["rewrite_pool"] = []
+if "current_index" not in st.session_state:
+    st.session_state["current_index"] = 0
+if "last_emotion" not in st.session_state:
+    st.session_state["last_emotion"] = "—"
+if "current_text" not in st.session_state:
+    st.session_state["current_text"] = ""
+if "current_tone" not in st.session_state:
+    st.session_state["current_tone"] = "—"
+if "submitted" not in st.session_state:
+    st.session_state["submitted"] = False
+if "camera_key" not in st.session_state:
+    st.session_state["camera_key"] = time.time()
+if "used_fallback" not in st.session_state:
+    st.session_state["used_fallback"] = False
+
+
+# (get_next_rewrite function is unchanged)
+def get_next_rewrite():
+    if st.session_state["current_index"] >= len(st.session_state["rewrite_pool"]):
+        st.session_state["current_index"] = 0
+        st.session_state["rewrite_pool"] = []
+        st.session_state["submitted"] = True
+        st.rerun()
+    else:
+        st.session_state["current_index"] += 1
+
+
+# Layout: left (input + camera/upload), right (output)
+left_col, right_col = st.columns([1, 1])
+
+
+# --- LEFT COLUMN: Input and Capture ---
+with left_col:
+    st.markdown('<div class="stCustomContainer input-container">', unsafe_allow_html=True)
+    st.header("1) Enter your text")
+    user_text = st.text_area("Type something you want rewritten:", height=160, placeholder="e.g., I need to leave now.", key="user_text_area")
+    
+    with st.form(key='input_form'):
+        form_submitted = st.form_submit_button("Submit text & prepare for mood capture")
+        
+        if form_submitted and user_text and user_text.strip():
+            if user_text != st.session_state["current_text"] or not st.session_state["rewrite_pool"]:
+                st.session_state["submitted"] = True
+                st.session_state["current_text"] = user_text
+                st.session_state["rewrite_pool"] = []
+                st.session_state["current_index"] = 0
+                st.session_state["last_emotion"] = "—"
+                st.session_state["current_tone"] = "—"
+                st.session_state["camera_key"] = time.time()
+                st.session_state["used_fallback"] = False
+                st.rerun()
+        elif form_submitted:
+                st.warning("Please enter some text before submitting.")
+
+    # Camera and capture flow
+    img_pil = None
+    if st.session_state["submitted"] and st.session_state["current_text"]:
+        st.header("2) Capture or Upload Your Mood")
+        
+        col_upload, col_camera = st.columns(2)
+        
+        with col_upload:
+            uploaded_file = st.file_uploader("Upload Photo (JPG/PNG)", type=["jpg", "jpeg", "png"])
+            
+        with col_camera:
+            camera_file = st.camera_input("Live Camera Snapshot", key=st.session_state["camera_key"])
+
+        processed_image_data = None
+        if uploaded_file is not None:
+            processed_image_data = uploaded_file.getvalue()
+        elif camera_file is not None:
+            processed_image_data = camera_file.getvalue()
+
+
+        if processed_image_data is not None:
+            try:
+                img_pil = Image.open(io.BytesIO(processed_image_data)).convert("RGB")
+                st.image(img_pil, caption="Image Submitted for Analysis", use_column_width=True)
+            except Exception as e:
+                st.error(f"Failed to read the image: {e}")
+                img_pil = None
+            
+            if img_pil is not None:
+                # 2) Emotion Detection
+                with st.spinner("Detecting emotion..."):
+                    # <-- This function now filters 'neutral' and randomizes fallbacks
+                    dominant_emotion, emotions_dict = detect_emotion_from_pil(img_pil)
+                    time.sleep(0.4) 
+                
+                target_tone = get_target_tone(dominant_emotion)
+                
+                st.markdown(f'<div class="emotion-badge">Detected Tone: {target_tone.capitalize()}</div>', unsafe_allow_html=True)
+                
+                # 3) Call Ollama endpoint
+                prompt = build_prompt(st.session_state["current_text"], dominant_emotion, target_tone)
+                rewrites = None
+                
+                try:
+                    # --- PRIORITY: CALL OLLAMA API FOR UNIQUE REWRITES ---
+                    spinner_msg = f"Contacting local Ollama ({OLLAMA_MODEL}) for **3 CONTEXTUAL SYNONYMS**... (This may take a moment)"
+                    with st.spinner(spinner_msg):
+                        rewrites = call_ollama_json(prompt, target_tone, model_name=OLLAMA_MODEL)
+                        
+                    st.toast(f"Rewrite pool (3 synonyms) generated by {OLLAMA_MODEL}!")
+                    st.session_state["used_fallback"] = False
+                except Exception as e:
+                    # --- FALLBACK: USE DYNAMIC TEMPLATES (contextual expressions) ---
+                    st.error(f"Ollama call failed. Falling back to contextual emotional expressions. Error: ({e})")
+                    # <-- This function now uses randomized fallbacks
+                    rewrites = fallback_rewrites(st.session_state["current_text"], dominant_emotion)
+                    st.toast("Used CONTEXTUAL fallback to generate a rewrite pool.")
+                    st.session_state["used_fallback"] = True
+
+                # Save the pool and reset index
+                pool_key = target_tone.capitalize()
+                st.session_state["rewrite_pool"] = rewrites.get(pool_key, [])
+                st.session_state["current_index"] = 0
+                st.session_state["last_emotion"] = dominant_emotion
+                st.session_state["current_tone"] = target_tone
+                st.session_state["submitted"] = False
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True) # Close custom container
+
+
+# --- RIGHT COLUMN: Output and Rewrites ---
+with right_col:
+    st.markdown('<div class="stCustomContainer output-container">', unsafe_allow_html=True)
+    st.header("3) Rewritten Output ")
+    
+    current_tone = st.session_state.get("current_tone", "—")
+    current_index = st.session_state.get("current_index", 0)
+    rewrite_pool = st.session_state.get("rewrite_pool", [])
+
+    st.markdown(f"**Original Text:** *{st.session_state.get('current_text', 'N/A')}*")
+    st.markdown(f"**Emotion/Rewrite Tone:** **{current_tone.capitalize()}**")
+    st.markdown("---")
+
+    if st.session_state["used_fallback"]:
+        st.warning(
+            "⚠️ **OLLAMA API OFFLINE (FALLBACK USED):** The output below is a **contextual emotional expression** and is **NOT** a sophisticated synonym generated by the AI."
+        )
+        st.markdown("---")
+
+    st.markdown(f"##  **{current_tone.capitalize()}** rewriting ")
+    
+    pool_size = len(rewrite_pool)
+
+    if not rewrite_pool:
+        st.info("No rewrites available. Complete steps 1 and 2 on the left to generate the pool.")
+    elif current_index < pool_size:
+        st.markdown('<div class="emotion-card">', unsafe_allow_html=True)
+        st.markdown(f"**{current_index + 1} of {pool_size}:**") 
+        st.markdown(f"**{rewrite_pool[current_index]}**") 
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown("---")
+
+        st.markdown('<div class="stCustomButton">', unsafe_allow_html=True)
+        st.button(f"Next Synonym ({pool_size - current_index - 1} remaining)", on_click=get_next_rewrite)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info(f"Pool of {pool_size} unique rewrites exhausted.")
+        st.button("Regenerate Rewrites (New Pool)", on_click=get_next_rewrite)
+    
+    st.markdown('</div>', unsafe_allow_html=True) # Close custom container
